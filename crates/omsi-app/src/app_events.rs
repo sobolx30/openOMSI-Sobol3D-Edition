@@ -2080,6 +2080,8 @@ impl ApplicationHandler for App {
                         // puddles and the wet asphalt the renderer draws (the same wetness:
                         // none under snow, OMSI_WETNESS as the picture takes it)
                         let wetness = puddles::road_wetness(self.wetness, wt.snow);
+                        // (and the tyres' grip takes the same water: `DriveGround::surface`)
+                        w.road_wetness.store(wetness.to_bits(), std::sync::atomic::Ordering::Relaxed);
                         if (wetness > 0.0 || !self.spray.is_empty()) && omsi_cfg::env::var_os("OMSI_NO_SPRAY").is_none() {
                             let __ts = Instant::now();
                             let mut vehicles: Vec<(u64, &omsi_sim::VehicleInstance)> = Vec::new();

@@ -383,6 +383,8 @@ pub(crate) fn run_offscreen(
     // moving with the weather's wind ([wind] direction (deg) speed (m/s))
     let mut spray = puddles::Spray::new();
     let spray_wet = puddles::road_wetness(initial_wetness(&weather), weather.snow);
+    // (the tyres' grip takes the same water: `DriveGround::surface`)
+    world.road_wetness.store(spray_wet.to_bits(), std::sync::atomic::Ordering::Relaxed);
     let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
     for i in 0..total_frames {
         let t_s = i as f32 * dt;

@@ -423,6 +423,8 @@ pub(crate) fn spawn_player(
     vehicle.contact = Some(std::sync::Arc::new(scene::DriveGround {
         terrains,
         surfaces,
+        paint: world.ground_paint.clone(),
+        wetness: world.road_wetness.clone(),
     }));
     let objects = crate::settings::Settings::load().collision_objects;
     vehicle.collision = objects.then(|| world.collision.lock().clone());

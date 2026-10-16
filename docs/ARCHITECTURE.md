@@ -1019,6 +1019,40 @@ Reverse engineered from Omsi.exe and put in place of our own guesses:
   sin(x)/x a step, x = 1.5 sqrt(sum springs / mass) dt (0x7e4f55); no yaw damping.
   `cargo run --release -p omsi-sim --example handling -- <file.bus>...` prints yaw response,
   side slip, roll, roll frequency and settling per file.
+  *Grip per tyre* (grip-1): OMSI's tyres know one road - ode.dll gets one `mu` for the world
+  from `StreetCond`. Here every face a wheel can stand on carries a `SurfaceKind` read off its
+  texture's file name (`omsi-geometry::SurfaceKind`, `scene::surface_class`: asphalt, concrete,
+  paving, kerb, soft ground; height profiles and collision meshes stay `Unknown`), the
+  `DriveGrid` keeps it per triangle (`class_at`), and `Ground::surface` answers once a slice per
+  wheel under the hub what the tyre stands on and how deep in a puddle it is
+  (`puddles::water_at`, the renderer's own mask). `RigidBody::tyre_grip` scales the weather's
+  `road_grip` by it (setts 0.8 dry / 0.65 wet, grass 0.55 / 0.4, a kerb 0.9, towards 0.35 at
+  the heart of a puddle) and every use of the friction in the step - the longitudinal clamp,
+  the slip and lock of the wheel, the lateral cap and the holding threshold - takes the
+  tyre's own. `OMSI_UNIFORM_GRIP=1` gives all tyres the road's one friction again. Bare
+  terrain reads the ground brush: each tile's paint masks (`load_ground_paint`, the GPU's
+  layers) are summed once into a 128 x 128 raster of kinds (`omsi_geometry::GroundPaint`,
+  `World::ground_paint`, in and out with the tile's `Terrain`) - the base `[groundtex]`
+  everywhere, each painted layer's kind where its alpha covers, an unclassified layer leaving
+  what is under it - so a car park painted asphalt or a side street painted cobbles grips as
+  such, and puddles may stand on it; unpainted terrain stays `Soft`.
+  *Open differential* (diff-1): `M_Wheel` went to every driven wheel in a fixed share; a bus
+  axle is an open differential, so the side with grip passes on no more than the spinning
+  side's sliding friction and nothing while its partner is in the air (`step_slice`, before
+  the tyre forces). `OMSI_NO_DIFF=1` restores the fixed shares. `Velocity` and `n_Wheel`
+  stay the mean of the driven wheels, so a spinning wheel still shows to the ASR scripts.
+  *Rolling resistance* (rolling-1): `[rollwiderstand]` was a constant split evenly over the
+  wheels; it is now the unladen vehicle's value on asphalt, standing, and each tyre rolls
+  against its coefficient x its load x (1 + v / 30 m/s) x its ground (setts 1.3, a kerb 1.2,
+  soft ground 3, snow up to 4 by `StreetCond`), `RigidBody::rolling_force`; the coupled parts
+  the same with their own `crr`. The file's value comes back exactly for the unladen bus at
+  rest; passengers, a grade's extra axle load and speed add theirs.
+  *Friction circle* (circle-1): OMSI keeps a tyre's grip across whole whatever its brake or
+  drive takes along it, so a bus braked to a slide with two wheels on the grass stopped
+  crooked in its deceleration but dead straight in its heading. The lateral constraint's cap
+  is now sqrt((mu N)² - F_long²): a locked or spinning tyre holds nothing across (a puck),
+  the split-grip slide pulls towards the asphalt side, and wheelspin lets the back step out.
+  `OMSI_NO_FRICTION_CIRCLE=1` keeps the two apart as Omsi.exe does.
 * **Mouse steering** (0x6f4284): the window's full width is the full lock, divided by
   max(1, km/h / 10); a one-second ease-in after switching on; the mouse owns the wheel (a
   steering key's leftover no longer takes over when the cursor passes the middle). The speed

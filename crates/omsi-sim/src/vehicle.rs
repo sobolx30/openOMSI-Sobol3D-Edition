@@ -1847,9 +1847,14 @@ impl VehicleInstance {
                         .v_brakes
                         .iter()
                         .map(|&id| self.get(id).max(0.0))
-                        .sum::<f32>()
-                        + def.rolling_resistance.max(0.0),
+                        .sum::<f32>(),
                     load: (0..def.axles.len()).map(wheel_load).sum::<f32>() + carried * 9.81,
+                    // its `[rollwiderstand]` over its own unladen weight: the rigid body
+                    // rolls it against its load and speed like the front section's tyres
+                    crr: {
+                        let dry = if def.mass < 100.0 { def.mass * 1000.0 } else { def.mass }.max(500.0);
+                        def.rolling_resistance.max(0.0) / (dry * 9.81)
+                    },
                 }
             })
             .collect()
@@ -1908,7 +1913,14 @@ impl VehicleInstance {
                     (None, None) => &flat,
                 };
             rb.wheel_walls = self.wheel_walls;
-            rb.step(dt, m_wheel, brakes, steer, probe);
+            // what each tyre stands on, from the same ground (a plain height function knows
+            // no surfaces: every tyre then gets the road's own grip)
+            let contact = self.contact.clone();
+            let surface = move |x: f64, y: f64, z: f64| match &contact {
+                Some(c) => c.surface(x, y, z),
+                None => crate::rigid::Surface::default(),
+            };
+            rb.step_on(dt, m_wheel, brakes, steer, probe, &surface);
         }
         // what the crashes of this step destroyed, and the worst of them
         let mut energy = 0.0f32;
@@ -2210,10 +2222,12 @@ impl VehicleInstance {
         self.set_engine_var("train_frontcoupling", 0.0);
         self.set_engine_var("train_backcoupling", if self.trailers.is_empty() { 0.0 } else { 1.0 });
         self.set_engine_var("train_me_reverse", 0.0);
-        // and for the tyres' grip
+        // and for the tyres' grip: the road's own, which each tyre scales by what it stands
+        // on (`RigidBody::tyre_grip`), and the state of the road for the rolling resistance
         let mu = road_grip(self.host.street_cond, self.host.temperature);
         if let Some(rb) = self.rigid.as_mut() {
             rb.friction = mu;
+            rb.street_cond = self.host.street_cond;
         }
     }
 
