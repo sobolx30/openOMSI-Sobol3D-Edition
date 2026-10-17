@@ -369,7 +369,7 @@ impl App {
                 self.menu_prev_pause = self.paused;
                 self.page_action(def.id);
             }
-            "washfuel" => self.run_service("washfuel"),
+            "washfuel" => self.run_service("washfuel", "player"),
             "arrows" => {
                 crate::game_lists::flip_switch(self, "nav_arrows");
             }

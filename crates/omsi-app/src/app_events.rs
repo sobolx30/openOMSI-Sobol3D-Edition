@@ -1546,6 +1546,9 @@ impl ApplicationHandler for App {
                 self.foot_after_humans();
                 // (the trip that is over this frame, for its summary)
                 let mut trip_ended: Option<usize> = None;
+                if self.duty.is_none() {
+                    self.career.no_trip();
+                }
                 if let (Some(d), Some(p), Some(w), false) = (
                     self.duty.as_mut(),
                     self.player.as_mut(),
@@ -1562,6 +1565,12 @@ impl ApplicationHandler for App {
                     let due = (d.trip_index, d.next_stop);
                     let trip_before = d.trip_index;
                     let served = d.update(&mut p.vehicle, self.clock.time);
+                    // (also one ended between frames: the last stop skipped from the menu; a trip
+                    // reopened by a page counts from its start again, and its next end is told too)
+                    if let Some(run) = d.take_reopened() {
+                        self.career.trip_reopened(run);
+                    }
+                    let ended = d.take_finished();
                     if let Some((arrival, departure)) = served {
                         self.career.stop_served(arrival, departure);
                     }
@@ -1573,10 +1582,18 @@ impl ApplicationHandler for App {
                     } else if d.terminus_served() {
                         trip_ended = Some(d.trip_index);
                     }
+                    use omsi_plugin::InfoValue::{Num, Text};
                     if let Some((count, due_at, at)) = d.take_skipped() {
-                        use omsi_plugin::InfoValue::Num;
                         crate::plugins::queue_event(&mut self.plugin_events, "stops_skipped", vec![Num(count as f64), Num(due_at as f64), Num(at as f64)]);
                     }
+                    // the trip over, rated before the next one starts its ratings afresh (none for a
+                    // trip the bus was never driven on: a duty taken at its last stop)
+                    if let Some(f) = ended {
+                        if let Some([driving, comfort, tickets]) = self.career.trip_ended(f.run) {
+                            crate::plugins::queue_event(&mut self.plugin_events, "trip_done", vec![Num(f.index as f64 + 1.0), Text(f.how.as_str().into()), Num(driving), Num(comfort), Num(tickets)]);
+                        }
+                    }
+                    self.career.trip_driven(d.trip_run());
                     if d.take_trip_change() && p.duty_typed {
                         let (trip, stop) = d.trip_for_ibis();
                         p.set_duty_destination(trip, stop);
@@ -1614,6 +1631,11 @@ impl ApplicationHandler for App {
                         let args = vec![Num(crash as f64 / 1000.0), Num(p.vehicle.physics.velocity_kmh().abs() as f64)];
                         crate::plugins::queue_event(&mut self.plugin_events, "crash", args);
                     }
+                }
+                for j in self.career.take_jolts() {
+                    use crate::plugins::num_f32;
+                    let args = vec![num_f32(j.along), num_f32(j.across), num_f32(j.speed_kmh), omsi_plugin::InfoValue::Num(j.riders as f64)];
+                    crate::plugins::queue_event(&mut self.plugin_events, "jolt", args);
                 }
                 if !self.paused {
                     crate::admin::guard_fall(self, dt);
@@ -1677,6 +1699,7 @@ impl ApplicationHandler for App {
                 if let Some(steam) = self.steam.as_ref() {
                     steam.client.run_callbacks();
                 }
+                self.pump_stopped();
                 // the plugins' frame, with the bus's scripts done
                 let plugins = self.plugins.get_or_insert_with(crate::plugins::load);
                 if !plugins.is_empty() && !self.paused {
@@ -1697,6 +1720,7 @@ impl ApplicationHandler for App {
                         self.service_msg = Some(m);
                     }
                     // what the plugins asked the game to do: lines of the game menu
+                    self.plugin_command = true;
                     for c in commands {
                         if let Some(k) = self.game_menu_items().iter().position(|m| m.0 == c) {
                             let was = self.game_menu;
@@ -1712,6 +1736,7 @@ impl ApplicationHandler for App {
                             self.page_action(&c);
                         }
                     }
+                    self.plugin_command = false;
                 } else {
                     self.plugin_keys.clear();
                     // (while the game is paused they wait for the next frame)
@@ -1743,6 +1768,10 @@ impl ApplicationHandler for App {
                     self.career.ticket_points = h.ticket_points as i32;
                     // the options' [no_collision_pedastrians]: nobody is knocked down
                     let hurt = if self.settings.collision_pedestrians { h.run_over(&p.vehicle) } else { 0 };
+                    for (name, price) in h.take_sales() {
+                        let args = vec![omsi_plugin::InfoValue::Text(name.trim().to_string()), crate::plugins::num_f32(price)];
+                        crate::plugins::queue_event(&mut self.plugin_events, "ticket_sold", args);
+                    }
                     if hurt > 0 {
                         self.career.crashes[1] += hurt as i32;
                         self.service_msg = Some(("Pedestrian knocked down!".into(), 6.0));

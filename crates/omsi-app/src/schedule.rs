@@ -3842,6 +3842,44 @@ pub fn ibis_stop_index(hof: &omsi_vehicle::Hof, route: usize, name: &str, k: usi
         .min_by_key(|i| i.abs_diff(k))
 }
 
+/// How a trip of the player's duty ended (`Finished`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TripEnd {
+    /// Its last stop reached, or the next trip's first stop from its last leg.
+    Arrived,
+    /// Its last stop skipped.
+    Skipped,
+    /// Begun, and over half an hour past its end: the duty went on.
+    GivenUp,
+}
+
+impl TripEnd {
+    /// As Lua plugins' `trip_done` names it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TripEnd::Arrived => "arrived",
+            TripEnd::Skipped => "skipped",
+            TripEnd::GivenUp => "given_up",
+        }
+    }
+}
+
+/// A trip of the player's duty that ended (`PlayerDuty::take_finished`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Finished {
+    /// Its index in the duty's `trips`.
+    pub index: usize,
+    pub how: TripEnd,
+    /// Its run (`PlayerDuty::trip_run`).
+    pub run: u64,
+}
+
+/// A trip run's number (`PlayerDuty::trip_run`): never the same twice in a game.
+fn next_run() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The player's tour: its trips with planned stop times, and the progress along them.
 pub struct PlayerDuty {
     pub line: String,
@@ -3873,6 +3911,13 @@ pub struct PlayerDuty {
     trip_changed: bool,
     /// Stops the bus passed without stopping since the last `take_skipped` (see `catch_up`).
     skipped: Option<(usize, usize, usize)>,
+    /// The current trip's run: a number no other trip of this game had (a trip taken again
+    /// is another run), for rating a trip on its own (`trip_run`).
+    run: u64,
+    /// A trip ended since the last `take_finished` (see there).
+    finished: Option<Finished>,
+    /// A page reopened this run's trip after its end was taken (`take_reopened`).
+    reopened: Option<u64>,
     /// The player picked the current trip: the duty does not move on past it before it is
     /// driven (or given up), however late the bus is for it.
     picked: bool,
@@ -4237,6 +4282,9 @@ impl Schedule {
             placed: false,
             trip_changed: false,
             skipped: None,
+            run: next_run(),
+            finished: None,
+            reopened: None,
             picked: trip.map(|t| !t.trim().is_empty()).unwrap_or(false),
             first_update: None,
             heading: 0.0,
@@ -4688,6 +4736,32 @@ impl PlayerDuty {
         self.skipped.take()
     }
 
+    /// The trip that ended since the last call, and how (see [`Finished`]); Lua plugins get
+    /// it as the `trip_done` event. (A saved situation restored at the last stop is over, but
+    /// did not end now; neither did a trip passed over unbegun.)
+    pub fn take_finished(&mut self) -> Option<Finished> {
+        self.finished.take()
+    }
+
+    /// The current trip's run: a number no other trip had in this game, a new one every
+    /// time the duty goes on to a trip (or a duty is taken).
+    pub fn trip_run(&self) -> u64 {
+        self.run
+    }
+
+    /// The run (`trip_run`) whose trip a page reopened after its end was taken: it ends again
+    /// later, and that end counts too.
+    pub fn take_reopened(&mut self) -> Option<u64> {
+        self.reopened.take()
+    }
+
+    /// The current trip ended `how` (the first ending since the last `take_finished` counts).
+    fn finish(&mut self, how: TripEnd) {
+        if self.finished.is_none() {
+            self.finished = Some(Finished { index: self.trip_index, how, run: self.run });
+        }
+    }
+
     /// How late the bus arrived at the stop it stands at (s; negative: early), None while it
     /// stands at none: the journey's log notes the arrival (`journey`).
     pub fn arrived(&self) -> Option<f64> {
@@ -4924,6 +4998,11 @@ impl PlayerDuty {
         self.served_terminus = None;
         self.arrived_late = None;
         if back {
+            // the trip ended reopened: an ending not yet taken is no ending, one taken is
+            // undone (`take_reopened`)
+            if self.done && self.finished.take().is_none() {
+                self.reopened = Some(self.run);
+            }
             self.done = false;
             self.held_back = true;
         }
@@ -4950,6 +5029,7 @@ impl PlayerDuty {
             self.at_stop = false;
             self.arrived_late = None;
             self.done = true;
+            self.finish(TripEnd::Skipped);
             return Some(name);
         }
         self.skip_to(self.next_stop + 1).then_some(name)
@@ -4957,6 +5037,7 @@ impl PlayerDuty {
 
     fn set_trip(&mut self, index: usize) {
         self.trip_index = index;
+        self.run = next_run();
         self.next_stop = 0;
         self.at_stop = false;
         self.done = false;
@@ -5192,6 +5273,14 @@ impl PlayerDuty {
             if !(self.done || unbegun || given_up || at_next_start) {
                 break;
             }
+            // (one done has ended already; one the bus never left a stop of was never driven,
+            // picked or not)
+            let begun = self.left_late.is_some();
+            if !self.done && begun && at_next_start {
+                self.finish(TripEnd::Arrived);
+            } else if !self.done && begun && given_up {
+                self.finish(TripEnd::GivenUp);
+            }
             self.set_trip(self.trip_index + 1);
             log::info!(
                 "duty: trip {} {} to {}",
@@ -5219,8 +5308,9 @@ impl PlayerDuty {
                         self.arrived_late = Some(day_time - stop.arr);
                     }
                     self.at_stop = true;
-                    if self.next_stop == last {
+                    if self.next_stop == last && !self.done {
                         self.done = true;
+                        self.finish(TripEnd::Arrived);
                     }
                 } else if self.at_stop && d > LEFT_STOP {
                     self.at_stop = false;
@@ -5878,6 +5968,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -5990,6 +6083,9 @@ pub(crate) mod tests {
             placed: false,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: false,
             first_update: None,
             heading: 90.0,
@@ -6074,6 +6170,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -6114,6 +6213,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -6150,6 +6252,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -6164,7 +6269,7 @@ pub(crate) mod tests {
     fn the_next_stop_can_be_skipped() {
         let trip = planned(0.0, &[(0.0, 0.0, 0.0), (100.0, 60.0, 60.0), (500.0, 120.0, 120.0), (1000.0, 200.0, 200.0)]);
         let next = planned(400.0, &[(1040.0, 400.0, 400.0), (1500.0, 500.0, 500.0)]);
-        let mut d = PlayerDuty { line: "5".into(), tour: "1".into(), trips: vec![trip, next], trip_index: 0, first_trip: 0, next_stop: 0, at_stop: false, arrived_late: None, done: false, served_terminus: None, left_late: None, held_back: false, placed: true, trip_changed: false, skipped: None, picked: true, first_update: None, heading: 90.0, pos: None };
+        let mut d = PlayerDuty { line: "5".into(), tour: "1".into(), trips: vec![trip, next], trip_index: 0, first_trip: 0, next_stop: 0, at_stop: false, arrived_late: None, done: false, served_terminus: None, left_late: None, held_back: false, placed: true, trip_changed: false, skipped: None, run: 0, finished: None, reopened: None, picked: true, first_update: None, heading: 90.0, pos: None };
         // at the first stop and away from it: the next is s1
         d.advance(glam::DVec3::new(0.0, 0.0, 0.0), 0.0);
         d.advance(glam::DVec3::new(50.0, 0.0, 0.0), 10.0);
@@ -6212,6 +6317,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -6264,6 +6372,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -6299,6 +6410,9 @@ pub(crate) mod tests {
             placed: true,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: true,
             first_update: None,
             heading: 90.0,
@@ -6369,6 +6483,9 @@ pub(crate) mod tests {
             placed: false,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: false,
             first_update: None,
             heading: 0.0,
@@ -6425,6 +6542,9 @@ pub(crate) mod tests {
             placed: false,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: false,
             first_update: None,
             heading: 0.0,
@@ -6469,6 +6589,9 @@ pub(crate) mod tests {
             placed: false,
             trip_changed: false,
             skipped: None,
+            run: 0,
+            finished: None,
+            reopened: None,
             picked: false,
             first_update: None,
             heading: 0.0,
@@ -6509,6 +6632,107 @@ pub(crate) mod tests {
         assert_eq!(chosen_trip(&trips, "1"), Some(0));
         assert_eq!(chosen_trip(&trips, "3"), Some(2));
         assert_eq!(chosen_trip(&trips, "4"), None);
+    }
+
+    /// A trip ends once for the plugins' `trip_done`: when the bus reaches its last stop, or
+    /// the last stop is skipped; not again while the bus stands there.
+    #[test]
+    fn a_trip_ends_once_by_arriving_or_skipping_its_last_stop() {
+        let ended = |d: &mut PlayerDuty| d.take_finished().map(|f| (f.index, f.how));
+        let mut d = early_departure_duty();
+        let run = d.trip_run();
+        d.advance(glam::DVec3::new(400.0, 0.0, 0.0), 150.0);
+        assert_eq!(ended(&mut d), None);
+        d.advance(glam::DVec3::new(500.0, 0.0, 0.0), 200.0);
+        assert!(d.trip_done());
+        assert_eq!(d.take_finished(), Some(Finished { index: 0, how: TripEnd::Arrived, run }));
+        d.advance(glam::DVec3::new(500.0, 0.0, 0.0), 201.0);
+        assert_eq!(ended(&mut d), None);
+
+        let mut d = early_departure_duty();
+        d.advance(glam::DVec3::new(400.0, 0.0, 0.0), 150.0);
+        assert_eq!(d.skip_next().as_deref(), Some("s1"));
+        assert_eq!(ended(&mut d), Some((0, TripEnd::Skipped)));
+    }
+
+    /// A saved situation continued at the trip's last stop: the trip is over, but it did not
+    /// end now (no `trip_done` for it).
+    #[test]
+    fn a_trip_restored_at_its_last_stop_has_not_just_ended() {
+        let mut d = early_departure_duty();
+        d.restore_progress(1, glam::DVec3::new(500.0, 0.0, 0.0));
+        assert!(d.trip_done());
+        assert_eq!(d.take_finished(), None);
+    }
+
+    /// A page going back reopens an ended trip: an ending not yet taken is dropped, one taken
+    /// is undone, and the trip ends again; the next trip is another run.
+    #[test]
+    fn a_reopened_trip_ends_again_and_the_next_trip_is_another_run() {
+        let mut d = early_departure_duty();
+        let run = d.trip_run();
+        d.advance(glam::DVec3::new(500.0, 0.0, 0.0), 200.0);
+        assert!(d.skip_to(0));
+        assert_eq!(d.take_finished(), None, "not yet taken: dropped");
+        assert_eq!(d.take_reopened(), None, "nothing to undo");
+        assert_eq!(d.trip_run(), run, "the same trip goes on");
+        assert!(d.skip_to(1));
+        d.advance(glam::DVec3::new(500.0, 0.0, 0.0), 210.0);
+        assert_eq!(d.take_finished().map(|f| f.how), Some(TripEnd::Arrived));
+        // taken, then reopened: undone, and it ends again
+        assert!(d.skip_to(0));
+        assert_eq!(d.take_reopened(), Some(run));
+        assert!(d.skip_to(1));
+        d.advance(glam::DVec3::new(500.0, 0.0, 0.0), 220.0);
+        assert_eq!(d.take_finished().map(|f| (f.how, f.run)), Some((TripEnd::Arrived, run)));
+        // on to the next trip a minute before it leaves: another run
+        d.advance(glam::DVec3::new(500.0, 0.0, 0.0), 545.0);
+        assert_eq!(d.trip_index, 1);
+        assert_ne!(d.trip_run(), run);
+        assert_eq!(d.take_finished(), None);
+    }
+
+    /// Two trips: the bus on the first one's last leg, and the second one's first stop away
+    /// from the first one's terminus (500 m against 800 m).
+    fn last_leg_duty(left_late: Option<f64>) -> PlayerDuty {
+        PlayerDuty {
+            trips: vec![
+                planned(0.0, &[(0.0, 0.0, 0.0), (500.0, 200.0, 200.0)]),
+                planned(400.0, &[(800.0, 400.0, 400.0), (1500.0, 500.0, 500.0)]),
+            ],
+            next_stop: 1,
+            left_late,
+            run: 7,
+            ..early_departure_duty()
+        }
+    }
+
+    /// A trip whose terminus stop the bus never comes near: standing at the next trip's first
+    /// stop from its last leg ends it as arrived - once begun; one never begun did not end.
+    #[test]
+    fn standing_at_the_next_trips_first_stop_ends_a_begun_trip() {
+        let mut d = last_leg_duty(Some(0.0));
+        d.advance(glam::DVec3::new(800.0, 0.0, 0.0), 345.0);
+        assert_eq!(d.trip_index, 1);
+        assert_eq!(d.take_finished(), Some(Finished { index: 0, how: TripEnd::Arrived, run: 7 }));
+
+        let mut d = last_leg_duty(None);
+        d.advance(glam::DVec3::new(800.0, 0.0, 0.0), 345.0);
+        assert_eq!(d.trip_index, 1);
+        assert_eq!(d.take_finished(), None);
+    }
+
+    /// A picked trip given up half an hour past its end: given up once begun; one the bus never
+    /// left a stop of did not end.
+    #[test]
+    fn only_a_begun_trip_is_given_up() {
+        let mut d = last_leg_duty(Some(0.0));
+        d.advance(glam::DVec3::new(3000.0, 0.0, 0.0), 2100.0);
+        assert_eq!(d.take_finished().map(|f| (f.index, f.how)), Some((0, TripEnd::GivenUp)));
+
+        let mut d = last_leg_duty(None);
+        d.advance(glam::DVec3::new(3000.0, 0.0, 0.0), 2100.0);
+        assert_eq!(d.take_finished(), None);
     }
 
     #[test]

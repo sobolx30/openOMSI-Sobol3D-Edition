@@ -204,6 +204,7 @@ impl App {
                         .unwrap_or(0.0);
                     crate::admin::teleport(self, at, heading);
                     self.service_msg = Some(("The vehicle stands where you clicked".into(), 3.0));
+                    self.service_event("teleport", "player", None);
                 }
                 true
             }

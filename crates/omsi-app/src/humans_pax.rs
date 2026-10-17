@@ -3436,6 +3436,7 @@ impl Humans {
             self.pax_mut(i).unwrap().reach = false;
             self.tickets_sold += 1;
             self.ticket_cash += value;
+            self.sales.push((name, value));
             *taken_ticket = true;
             if let Some(m) = self.money.as_mut() {
                 m.clear(false);

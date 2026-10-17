@@ -675,6 +675,9 @@ pub(crate) fn run_offscreen(
             if crash > 0.0 {
                 career.crashed(crash, player.vehicle.physics.velocity_kmh() / 3.6);
             }
+            for j in career.take_jolts() {
+                log::info!("plugin event: jolt {j:?}");
+            }
             if i < drive_frames {
                 for (name, at) in &timed {
                     if *at > t_s - dt && *at <= t_s {
@@ -1061,6 +1064,9 @@ pub(crate) fn run_offscreen(
                     career.crashes[1] += hurt as i32;
                     log::warn!("{hurt} pedestrian(s) knocked down");
                 }
+            }
+            for (name, price) in h.take_sales() {
+                log::info!("plugin event: ticket_sold {} {price}", name.trim());
             }
             if std::mem::take(&mut h.stop_request) {
                 if let Some(p) = player.as_mut() {

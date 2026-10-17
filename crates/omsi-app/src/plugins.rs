@@ -54,6 +54,12 @@ pub(crate) fn queue_event(events: &mut Vec<GameEvent>, name: &'static str, args:
     events.push(GameEvent { name, args });
 }
 
+/// A game value kept as `f32`, for Lua as the number it reads as (2.1, not
+/// 2.0999999046325684).
+pub(crate) fn num_f32(x: f32) -> InfoValue {
+    InfoValue::Num(x.to_string().parse().unwrap_or(x as f64))
+}
+
 /// The game menu lines a plugin may run with `omsi.command` (those that do something at
 /// once, not the ones that open a list).
 pub(crate) const PLUGIN_COMMANDS: [&str; 14] = ["refuel", "wash", "repair", "shot", "save", "load", "weather", "later", "earlier", "info", "timetable", "reset", "couple", "uncouple"];
@@ -119,6 +125,9 @@ pub(crate) fn game_info(app: &crate::App) -> Vec<(&'static str, InfoValue)> {
             v.push(("terminus", Text(trip.terminus.trim().to_string())));
             v.push(("trip_name", Text(trip.name.trim().to_string())));
             v.push(("stops", Num(trip.stops.len() as f64)));
+            // the bus reached the trip's last stop: the trip is over, though the duty moves on to
+            // the next one only a minute before it leaves
+            v.push(("trip_done", Bool(d.trip_done())));
             if let Some(s) = trip.stops.get(d.next_stop) {
                 v.push(("next_stop", Text(s.name.trim().to_string())));
                 v.push(("next_stop_number", Num(d.next_stop as f64 + 1.0)));
@@ -302,6 +311,14 @@ mod tests {
 
     fn snapshot(info: Vec<(&'static str, InfoValue)>) -> Io<'static> {
         Io { vehicle: None, others: Vec::new(), dt: 0.0, message: None, info, commands: Vec::new(), keys: Vec::new(), events: Vec::new() }
+    }
+
+    /// A ticket's price or a jolt's acceleration reaches Lua as the number it reads as.
+    #[test]
+    fn f32_values_reach_lua_as_they_read() {
+        assert_eq!(num_f32(2.1), InfoValue::Num(2.1));
+        assert_eq!(num_f32(-5.4), InfoValue::Num(-5.4));
+        assert_eq!(num_f32(38.0), InfoValue::Num(38.0));
     }
 
     #[test]

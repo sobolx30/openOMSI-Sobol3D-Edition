@@ -1935,6 +1935,8 @@ pub struct Humans {
     /// Tickets sold at the cash desk this session and what they were worth.
     pub tickets_sold: u32,
     pub ticket_cash: f32,
+    /// The tickets sold since the last `take_sales`: name and value.
+    pub sales: Vec<(String, f32)>,
     /// Passengers that reached the cash desk, and those the driver served there.
     pub boarded: u32,
     pub served: u32,
@@ -2240,6 +2242,7 @@ impl Humans {
             stop_request: false,
             tickets_sold: 0,
             ticket_cash: 0.0,
+            sales: Vec::new(),
             boarded: 0,
             served: 0,
             stepped_in: 0,
@@ -4583,6 +4586,12 @@ impl Humans {
     /// Timetable buses to hold at their stop, for the traffic.
     pub fn take_holds(&mut self) -> Vec<(u64, Option<i64>, f32)> {
         std::mem::take(&mut self.holds)
+    }
+
+    /// The tickets sold at the cash desk since the last call: name and value. Lua plugins get
+    /// them as the `ticket_sold` event.
+    pub fn take_sales(&mut self) -> Vec<(String, f32)> {
+        std::mem::take(&mut self.sales)
     }
 
     /// Door requests for the timetable buses, for the traffic to hand to their scripts.

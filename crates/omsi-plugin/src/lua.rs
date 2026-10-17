@@ -2,9 +2,9 @@
 //! embedded Lua 5.4. Unlike a DLL plugin a Lua plugin lists nothing up front: it reads and
 //! writes the player's bus by name through the `omsi` table (see docs/PLUGINS.md), hears
 //! events (`start`, `frame`, `vehicle`, `stop`, and what happened in the game: `crash`,
-//! `pedestrian`, `stops_skipped`), keeps timers and watches, and has an
-//! `omsi.data` table saved between sessions. A changed file is loaded again while the game
-//! runs.
+//! `pedestrian`, `stops_skipped`, `trip_done`, `jolt`, `ticket_sold`, `service`), keeps
+//! timers and watches, and has an `omsi.data` table saved between sessions. A changed file is loaded
+//! again while the game runs.
 //!
 //! Each plugin has its own Lua state with the safe libraries only: no `io`, no `os`
 //! beyond the clock, no C modules and no `dofile`; `require` finds modules in the

@@ -3411,6 +3411,7 @@ impl App {
                     let (at, heading) = (p.vehicle.position, p.vehicle.heading);
                     crate::admin::teleport(self, at, heading);
                     self.service_msg = Some(("The vehicle stands on its wheels again".into(), 3.0));
+                    self.service_event("reset", self.menu_by(), None);
                 }
             }
             "teleport" => {
@@ -3443,11 +3444,11 @@ impl App {
             }
             "refuel" => {
                 self.close_game_menu();
-                self.toggle_pump();
+                self.toggle_pump(self.menu_by());
             }
             "wash" | "repair" => {
                 self.close_game_menu();
-                self.run_service(id);
+                self.run_service(id, self.menu_by());
             }
             "weather" => {
                 self.close_game_menu();
@@ -3872,8 +3873,9 @@ impl App {
     }
 
     /// The menu's Refuel button: a switch, as in OMSI. On, the pump runs every frame (see
-    /// `services::pump_frame`) until it is pressed again or the bus leaves the station.
-    pub(crate) fn toggle_pump(&mut self) {
+    /// `services::pump_frame`) until it is pressed again or the bus leaves the station. `by`
+    /// switched it on (the `service` event's, told once it stops: `pump_stopped`).
+    pub(crate) fn toggle_pump(&mut self, by: &'static str) {
         if self.pump {
             self.pump = false;
             self.service_msg = Some((omsi_ui::tr("Refuelling stopped").into_owned(), 3.0));
@@ -3884,21 +3886,37 @@ impl App {
             self.service_msg = Some((omsi_ui::tr("Refuel and wash only at a petrol station or in the depot's wash yard").into_owned(), 4.0));
             return;
         }
+        // (a bus whose script keeps no tank content is not told of: nothing to measure)
+        let from = p.vehicle.var("engine_tank_content");
         self.pump = true;
+        self.pump_from = from.map(|from| (from, by));
         self.service_msg = Some((omsi_ui::tr("Refuelling").into_owned(), 2.0));
     }
 
+    /// The fuel pump stopped since the last call (switched off, the bus left the station, or
+    /// it has no pump handling): the plugins hear the litres it put in (`service`).
+    pub(crate) fn pump_stopped(&mut self) {
+        if self.pump {
+            return;
+        }
+        if let Some((from, by)) = self.pump_from.take() {
+            let now = self.player.as_ref().and_then(|p| p.vehicle.var("engine_tank_content")).unwrap_or(from);
+            self.service_event("refuel", by, Some(now - from));
+        }
+    }
+
     /// One of the depot services of the game menu: "refuel", "wash" or "repair" (and the quick
-    /// menu's "washfuel": both refuelling and washing).
-    pub(crate) fn run_service(&mut self, kind: &str) {
+    /// menu's "washfuel": both refuelling and washing), asked for by `by` (the `service`
+    /// event's).
+    pub(crate) fn run_service(&mut self, kind: &str, by: &'static str) {
         // Refuelling is never a one-shot: it is the per-frame `veh_tank` pump toggle, so the
         // vehicle script does its own tanking (and whatever else it does) at its own pace.
         if kind == "refuel" {
-            self.toggle_pump();
+            self.toggle_pump(by);
             return;
         }
         if kind == "washfuel" && self.pump {
-            self.toggle_pump(); // second click: stop
+            self.toggle_pump(by); // second click: stop
             return;
         }
         let Some(w) = self.world.clone() else { return };
@@ -3912,6 +3930,9 @@ impl App {
         let at_station = at_petrol_station(&w, &p.vehicle);
         let mut clock = self.clock.clone();
         let msg = run_services(&one, &mut p.vehicle, &mut clock, w.global.repair_time_min, at_station);
+        // (the dirt left; the game minutes the repair took, the team's way there too)
+        let washed = msg.iter().any(|m| m.starts_with("washed")).then(|| p.vehicle.var("Dirt_Wiped").unwrap_or(0.0));
+        let repaired = (kind == "repair" && msg.iter().any(|m| m.starts_with("repaired"))).then(|| ((clock.time - self.clock.time) / 60.0) as f32);
         while clock.time >= 86400.0 {
             clock.time -= 86400.0;
             clock.day_of_year = clock.day_of_year % omsi_sim::clock::days_in_year(clock.year) + 1;
@@ -3928,9 +3949,36 @@ impl App {
         if !shown.is_empty() {
             self.service_msg = Some((shown, 6.0));
         }
-        if kind == "washfuel" {
-            self.toggle_pump(); // starts the pump (shows the station message if not at one)
+        if let Some(dirt) = washed {
+            self.service_event("wash", by, Some(dirt));
         }
+        if let Some(minutes) = repaired {
+            self.service_event("repair", by, Some(minutes));
+        }
+        if kind == "washfuel" {
+            self.toggle_pump(by); // starts the pump (shows the station message if not at one)
+        }
+    }
+
+    /// Who runs a line of the game menu now: a plugin's `omsi.command`, or the player.
+    pub(crate) fn menu_by(&self) -> &'static str {
+        if self.plugin_command {
+            "plugin"
+        } else {
+            "player"
+        }
+    }
+
+    /// Tell the plugins the player's bus was refuelled, washed, repaired, put back on its
+    /// wheels or moved (`service`: `kind`, who did it, and the amount of the kind).
+    pub(crate) fn service_event(&mut self, kind: &'static str, by: &'static str, amount: Option<f32>) {
+        if self.player.is_none() {
+            return;
+        }
+        use omsi_plugin::InfoValue::{Num, Text};
+        let mut args = vec![Text(kind.into()), Text(by.into())];
+        args.extend(amount.map(|a| Num(a as f64)));
+        crate::plugins::queue_event(&mut self.plugin_events, "service", args);
     }
 
     #[cfg(windows)]
@@ -4289,6 +4337,7 @@ impl App {
         let heading = heading as f64;
         crate::admin::teleport(self, pos, heading);
         self.service_msg = Some(("The bus stands where the map was clicked".into(), 3.0));
+        self.service_event("teleport", "player", None);
     }
 
     /// The world follows the sim date as OMSI's does at the day's change:
