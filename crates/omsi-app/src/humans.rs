@@ -3184,12 +3184,15 @@ impl Humans {
         // [ROLLBACK paxsoon-124] never one that is this very stop, and with a timetable only those
         // a bus leaves for soon (no falling back to all of them: that waited for the night line)
         let soon_here = self.soon.as_ref().and_then(|m| m.get(&id));
-        let timetable = self.soon.is_some() || self.stop_targets.is_some();
+        // Dedicated servers know the stop/line targets but do not compute a
+        // nearby departure window (soon). Filtering to an absent window would
+        // reject every destination and prevent passengers from spawning.
+        let restrict_to_departures = self.soon.is_some();
         let dests: Vec<(&String, f32)> = stop
             .dests
             .iter()
             .filter(|(n, _)| {
-                !stop.is_named(n) && (!timetable || soon_here.is_some_and(|s| s.contains(n)))
+                !stop.is_named(n) && (!restrict_to_departures || soon_here.is_some_and(|s| s.contains(n)))
             })
             .map(|(n, w)| (n, *w))
             .collect();
